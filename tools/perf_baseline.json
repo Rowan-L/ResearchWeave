@@ -1,0 +1,49 @@
+{
+  "created_at": "2026-10-28 00:57",
+  "papers": 2000,
+  "runs": 5,
+  "database_mb": 11.11,
+  "setup_wall_seconds": 3.19,
+  "scenarios": {
+    "list_all": {
+      "median_ms": 45.42,
+      "p95_ms": 46.11
+    },
+    "fts_chinese": {
+      "median_ms": 28.16,
+      "p95_ms": 31.58
+    },
+    "fts_english": {
+      "median_ms": 40.31,
+      "p95_ms": 46.26
+    },
+    "ilike_short_fallback": {
+      "median_ms": 32.53,
+      "p95_ms": 35.88
+    },
+    "filter_tag": {
+      "median_ms": 11.64,
+      "p95_ms": 16.51
+    },
+    "filter_category": {
+      "median_ms": 11.13,
+      "p95_ms": 16.44
+    },
+    "filter_status_year": {
+      "median_ms": 4.88,
+      "p95_ms": 9.26
+    },
+    "combined_smart_folder": {
+      "median_ms": 11.12,
+      "p95_ms": 18.23
+    },
+    "library_statistics": {
+      "median_ms": 18.56,
+      "p95_ms": 21.48
+    },
+    "related_papers": {
+      "median_ms": 92.12,
+      "p95_ms": 93.87
+    }
+  }
+}

@@ -1,0 +1,31 @@
+# ---- 用户数据(本地优先,永不入库;锚定仓库根,避免误伤子目录) ----
+/data/
+/papers/
+*.db
+*.db-wal
+*.db-shm
+
+# ---- 构建产物 ----
+dist/
+build/
+zip_version/dist/
+zip_version/build/
+zip_version/e2e_tmp/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- 日志与临时 ----
+test-tmp-perf/
+test-results/
+startup_error.log
+*.log
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini

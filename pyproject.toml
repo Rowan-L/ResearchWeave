@@ -1,0 +1,56 @@
+[project]
+name = "synthrecall"
+version = "0.1.0"
+description = "ResearchWeave (研脉), a local-first research evidence and literature workspace."
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6",
+    "SQLAlchemy",
+    "PyMuPDF",
+    "keyring",
+    "httpx",
+    "rapidfuzz",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+synthrecall = "synthrecall.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+synthrecall = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# FLY002:多行 "\n".join([...]) 在本项目中比隐式换行 f-string 更可读,统一豁免。
+ignore = ["FLY002"]
+
+[tool.ruff.lint.per-file-ignores]
+# BLE001:GUI 层"捕获一切→友好提示"是刻意设计(后台线程/信号槽不能让异常逃逸);
+# 后端模块的宽捕获逐处收窄,不走豁免。
+"src/synthrecall/ui/main_window.py" = ["BLE001"]
+"src/synthrecall/ui/pdf_preview.py" = ["BLE001"]
+"src/synthrecall/ui/pdf_reader.py" = ["BLE001"]
+"src/synthrecall/ui/discovery_view.py" = ["BLE001"]
+"src/synthrecall/ui/dialogs/*.py" = ["BLE001"]
+# Worker.run 在 QThread 里执行,一切异常必须转成 failed 信号而不是崩线程
+"src/synthrecall/ui/workers.py" = ["BLE001"]
