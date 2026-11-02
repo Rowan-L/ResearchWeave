@@ -7262,6 +7262,9 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # F26:任何关闭路径(退出/托盘化)都先把缓冲的阅读秒数落账,
+        # 否则直接关应用会丢最近一分钟的阅读时长
+        self._flush_reading_seconds()
         self._save_all_splitter_states()
         action = "exit" if self._tray_exit_requested else self._prompt_window_close_action()
         if action == "tray":

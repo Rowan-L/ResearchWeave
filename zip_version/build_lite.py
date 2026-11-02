@@ -58,22 +58,71 @@ def fmt(n: int) -> str:
     return f"{n / 1024 / 1024:.1f}MB"
 
 
+def _slim_app_running() -> bool:
+    """精简版是否在运行(运行中构建会锁库且 data 备份不完整)。"""
+    probe = subprocess.run(["tasklist"], check=False, capture_output=True, text=True)
+    return "ResearchWeave.exe" in (probe.stdout or "")
+
+
+def backup_slim_data() -> Path | None:
+    """构建前把精简版 data 目录移到备份位,构建后原样恢复。
+
+    PyInstaller 构建会整目录删除 dist/ResearchWeave——精简包实例里的
+    文献/译文/阅读记录同样是用户数据(B35 同款风险),不能随构建清掉。
+    """
+    data = APP / "data"
+    if not data.exists():
+        return None
+    backup_root = HERE / "_data_backup"
+    if backup_root.exists():
+        shutil.rmtree(backup_root)
+    backup_root.mkdir(parents=True)
+    backup = backup_root / "data"
+    shutil.move(str(data), str(backup))
+    print(f"已备份精简版数据 -> {backup}")
+    return backup
+
+
+def restore_slim_data(backup: Path | None) -> None:
+    if backup is None or not backup.exists():
+        return
+    target = APP / "data"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.move(str(backup), str(target))
+    print(f"已恢复精简版数据 -> {target}")
+    backup_root = HERE / "_data_backup"
+    if backup_root.exists():
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
 def build() -> None:
-    if (DIST / "ResearchWeave").exists():
-        print("清理旧精简产物 ...")
-        shutil.rmtree(DIST / "ResearchWeave")
-    cmd = [
-        sys.executable, "-m", "PyInstaller",
-        str(HERE / "ResearchWeaveLite.spec"),
-        "--noconfirm",
-        "--distpath", str(DIST),
-        "--workpath", str(BUILD),
-    ]
-    print("PyInstaller:", " ".join(cmd))
-    result = subprocess.run(cmd, cwd=str(ROOT), check=False)
-    if result.returncode != 0:
-        print("PyInstaller 构建失败", file=sys.stderr)
-        raise SystemExit(result.returncode)
+    if _slim_app_running():
+        print(
+            "检测到精简版 ResearchWeave.exe 正在运行:请先退出应用再构建,"
+            "否则 data 备份不完整且文件被占用。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    backup = backup_slim_data()
+    try:
+        if (DIST / "ResearchWeave").exists():
+            print("清理旧精简产物 ...")
+            shutil.rmtree(DIST / "ResearchWeave")
+        cmd = [
+            sys.executable, "-m", "PyInstaller",
+            str(HERE / "ResearchWeaveLite.spec"),
+            "--noconfirm",
+            "--distpath", str(DIST),
+            "--workpath", str(BUILD),
+        ]
+        print("PyInstaller:", " ".join(cmd))
+        result = subprocess.run(cmd, cwd=str(ROOT), check=False)
+        if result.returncode != 0:
+            print("PyInstaller 构建失败", file=sys.stderr)
+            raise SystemExit(result.returncode)
+    finally:
+        restore_slim_data(backup)
 
 
 def post_cleanup() -> None:
