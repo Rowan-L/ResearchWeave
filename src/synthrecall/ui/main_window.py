@@ -7945,7 +7945,7 @@ class MainWindow(QMainWindow):
         if (
             self._reading_paper_id is None
             or self.main_stack.currentWidget() is not self.reader_page
-            or not self.isActive()
+            or not self.isActiveWindow()
         ):
             return
         self._reading_seconds += 1

@@ -1887,3 +1887,20 @@ def test_open_current_pdf_folder_reveals_in_explorer(tmp_path, qtbot, monkeypatc
     window.open_current_pdf_folder()
     assert captured == {}
     assert infos, "无 PDF 时应给出提示"
+
+
+def test_reading_tick_accumulates_in_real_reader_session(tmp_path, qtbot):
+    """F31:真实计时链路——enter_reader 后 tick 每秒累计,离开时落库。"""
+    window, repository, paper, _source_pdf = make_window(tmp_path, qtbot)
+    window.show()
+    qtbot.wait(200)
+    window.activateWindow()
+    window.enter_reader()
+    assert window.main_stack.currentWidget() is window.reader_page
+    assert window._reading_paper_id == paper.id
+    qtbot.wait(12000)  # 真实等待 12 秒,tick 应累计 ~12 秒
+    elapsed = window._reading_seconds
+    assert elapsed >= 10, f"12 秒真实会话只累计了 {elapsed} 秒——tick 未工作"
+    window.leave_reader()
+    rows = repository.reading_time_summary()
+    assert rows["today"] >= 10, f"落库后统计应 ≥10 秒,实际 {rows['today']}"
