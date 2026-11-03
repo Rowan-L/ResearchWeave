@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from synthrecall.ai import DEFAULT_PROMPT_TEMPLATE
 from synthrecall.arxiv_discovery import ArxivPaper, DiscoveryRecommender
 from synthrecall.database import create_session_factory, init_database
-from synthrecall.repositories import DatasetMetricUpdate, LibraryRepository
+from synthrecall.repositories import DatasetMetricUpdate, LibraryRepository, PaperUpdate
 from synthrecall.ui.confirmation import ConfirmationDialog
 from synthrecall.ui.duplicate_cleanup import DuplicateCleanupDialog
 from synthrecall.ui.main_window import (
@@ -1716,3 +1716,174 @@ def test_gui_workspace_manager_and_switch_flow(tmp_path, qtbot, monkeypatch):
     window.switch_workspace("实验库")
     assert restarts == [True]
     assert ws.current_workspace(registry).name == "实验库"
+
+
+def test_parse_identifier_accepts_links_and_all_id_forms():
+    """用户反馈:入库应能直接解析 http 链接;覆盖 DOI/arXiv 全部输入形态。"""
+    from synthrecall.ui.main_window import MainWindow
+
+    parse = MainWindow._parse_identifier
+    # arXiv:裸 ID / 带版本号 / 官方链接(abs/pdf/html)/ export 子域 / 前缀写法
+    assert parse("1706.03762") == ("arxiv", "1706.03762")
+    assert parse("2501.12345v2") == ("arxiv", "2501.12345v2")
+    assert parse("https://arxiv.org/abs/1706.03762") == ("arxiv", "1706.03762")
+    assert parse("http://arxiv.org/pdf/1706.03762v2") == ("arxiv", "1706.03762v2")
+    assert parse("https://arxiv.org/html/2501.12345v1") == ("arxiv", "2501.12345v1")
+    assert parse("https://export.arxiv.org/abs/1706.03762") == ("arxiv", "1706.03762")
+    assert parse("arXiv:1706.03762") == ("arxiv", "1706.03762")
+    # 旧式 ID:分类/编号
+    assert parse("https://arxiv.org/abs/cs/0301012") == ("arxiv", "cs/0301012")
+    assert parse("math/0309136") == ("arxiv", "math/0309136")
+    # DOI:裸 / doi: 前缀 / doi.org 链接
+    assert parse("10.1000/xyz123") == ("doi", "10.1000/xyz123")
+    assert parse("doi:10.1000/xyz") == ("doi", "10.1000/xyz")
+    assert parse("https://doi.org/10.1000/xyz123") == ("doi", "10.1000/xyz123")
+    # 引号/空白容错(浏览器复制常带)
+    assert parse(' "https://arxiv.org/abs/1706.03762" ') == ("arxiv", "1706.03762")
+    # 普通网页 → 转交 AI 链接导入;无法识别 → 空类型
+    assert parse("https://example.com/page") == ("url", "https://example.com/page")
+    assert parse("hello world") == ("", "")
+
+
+def test_reading_seconds_flush_on_close(tmp_path, qtbot, monkeypatch):
+    """F26:窗口关闭(退出路径)时,缓冲中的阅读秒数落库——此前直接关应用会丢。"""
+    window, repository, paper, _ = make_window(tmp_path, qtbot)
+    window._reading_paper_id = paper.id
+    window._reading_unsaved_seconds = 45
+    # 退出路径:关窗提示返回 exit;无托盘、无未保存修改、无后台任务
+    monkeypatch.setattr(window, "_prompt_window_close_action", lambda: "exit")
+    window.close()
+    qtbot.wait(300)
+    summary = repository.reading_time_summary()
+    assert summary["today"] == 45
+
+
+def test_paper_list_multi_select_and_batch_ids(tmp_path, qtbot, monkeypatch):
+    """F28:批量多选——列表支持 Ctrl 多选,卡片有选中视觉,批量菜单拿到全部选中。"""
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+
+    window, repository, paper, _ = make_window(tmp_path, qtbot)
+    paper2 = repository.create_blank_paper()
+    repository.update_paper(
+        paper2.id,
+        PaperUpdate(
+            title="第二篇文献", authors="", year=None, venue="", doi="",
+            arxiv_id="", url="", abstract="", pdf_path="", reading_status="待读",
+            importance=3, summary="", datasets="", dataset_metrics="", methods="",
+            contributions="", limitations="", experiment_notes="",
+            reproducibility_notes="", memory_anchor="", personal_notes="",
+        ),
+    )
+    window.refresh_papers()
+    qtbot.wait(200)
+    assert window.paper_list.count() == 2
+
+    item1 = window.paper_list.item(0)
+    item2 = window.paper_list.item(1)
+
+    # 程序化双选:widget 模型支持多选,批量菜单能拿到全部选中 id
+    item1.setSelected(True)
+    item2.setSelected(True)
+    window.sync_card_selection()
+    assert sorted(window.selected_paper_ids()) == sorted({paper.id, paper2.id})
+    for item in (item1, item2):
+        card = window.paper_list.itemWidget(item)
+        assert card.property("selected") is True
+
+    # 重置为仅 item1 选中,再对卡片 2 发 Ctrl+点击(卡片发 listToggleRequested,
+    # 按切换语义应选中 item2 且保留 item1)
+    item2.setSelected(False)
+    item1.setSelected(True)
+    window.sync_card_selection()
+    card2 = window.paper_list.itemWidget(item2)
+    QTest.mouseClick(card2, _Qt.MouseButton.LeftButton,
+                     _Qt.KeyboardModifier.ControlModifier, card2.rect().center())
+    qtbot.wait(200)
+    selected = window.paper_list.selectedItems()
+    assert len(selected) == 2, f"Ctrl+点击卡片后应选中 2 项,实际 {len(selected)}"
+    assert {int(i.data(Qt.ItemDataRole.UserRole)) for i in selected} == {paper.id, paper2.id}
+
+    # 普通单击回到单选语义
+    QTest.mouseClick(window.paper_list.viewport(), _Qt.MouseButton.LeftButton,
+                     _Qt.KeyboardModifier.NoModifier, window.paper_list.visualItemRect(item2).center())
+    qtbot.wait(200)
+    assert len(window.paper_list.selectedItems()) == 1
+
+
+def test_editor_save_refreshes_uncategorized_tree(tmp_path, qtbot, monkeypatch):
+    """F28:未分类文献在编辑器里设主分类并返回后,"未分类"节点计数与列表即时更新。"""
+    window, repository, paper, _ = make_window(tmp_path, qtbot)
+    cat = repository.add_category("实验方法")
+    uncategorized = next(
+        c for c in repository.list_categories() if c.name == "未分类"
+    )
+    repository.add_category_to_papers([paper.id], uncategorized.id)
+    window.refresh_categories()
+    window.load_paper(paper.id)
+
+    # 编辑器里改主分类(下拉触发标脏),然后直接返回文献库(选择"保存")
+    cat_index = window.category_combo.findData(cat.id)
+    window.category_combo.setCurrentIndex(cat_index)
+    monkeypatch.setattr(
+        window, "_prompt_unsaved_changes",
+        lambda: __import__("PySide6.QtWidgets", fromlist=["QMessageBox"]).QMessageBox.StandardButton.Save,
+    )
+    window.return_from_editor()
+
+    # 树计数刷新:未分类归零,新分类 +1(分类节点挂在"全部文献"下,递归收集)
+    def walk(item):
+        yield item.text(0)
+        for row in range(item.childCount()):
+            yield from walk(item.child(row))
+    all_texts = list(walk(window.category_tree.invisibleRootItem()))
+    unc_text = next(t for t in all_texts if t.startswith("未分类"))
+    assert "0" in unc_text, f"未分类计数未刷新: {unc_text}"
+    assert any(t.startswith("实验方法") for t in all_texts), "新分类计数缺失"
+    # 数据库层面:主分类已替换,未分类不再挂在文献上
+    fresh = repository.get_paper(paper.id)
+    assert [c.name for c in fresh.categories] == ["实验方法"]
+
+
+def test_open_current_pdf_folder_reveals_in_explorer(tmp_path, qtbot, monkeypatch):
+    """F30:右键"打开本地文件路径"→ explorer /select 选中 PDF;无 PDF 时提示。"""
+    window, repository, _paper, source_pdf = make_window(tmp_path, qtbot)
+    captured = {}
+
+    class FakeProcess:
+        @staticmethod
+        def startDetached(program, arguments):
+            captured["program"] = program
+            captured["args"] = list(arguments)
+            return True
+
+    monkeypatch.setattr("synthrecall.ui.main_window.QProcess", FakeProcess)
+    infos: list[str] = []
+    monkeypatch.setattr(
+        "synthrecall.ui.main_window.QMessageBox",
+        type(
+            "FakeBox",
+            (),
+            {
+                "information": staticmethod(
+                    lambda *a, **k: infos.append(a[1] if len(a) > 1 else "")
+                )
+            },
+        ),
+    )
+
+    # 有 PDF:explorer /select,<pdf 路径>
+    window.open_current_pdf_folder()
+    assert captured["program"] == "explorer.exe"
+    assert len(captured["args"]) == 1
+    assert captured["args"][0].startswith("/select,")
+    assert source_pdf.name in captured["args"][0]
+
+    # 无 PDF 的文献:提示且不调 explorer
+    empty = repository.create_blank_paper()
+    window.select_paper(empty.id)
+    window.load_paper(empty.id)
+    captured.clear()
+    window.open_current_pdf_folder()
+    assert captured == {}
+    assert infos, "无 PDF 时应给出提示"

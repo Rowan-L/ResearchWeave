@@ -19,12 +19,14 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    QUrl,
 )
 from PySide6.QtGui import (
     QAction,
     QBrush,
     QCloseEvent,
     QColor,
+    QDesktopServices,
     QFont,
     QFontMetrics,
     QIcon,
@@ -4883,8 +4885,13 @@ class MainWindow(QMainWindow):
         item = self.paper_list.itemAt(position)
         if item is not None:
             self.paper_list.setCurrentItem(item)
+            # F30:setCurrentItem 不改选中集时 itemSelectionChanged 不触发,
+            # 显式走守卫与加载,保证菜单操作作用于右键所指的文献
+            if item.data(Qt.ItemDataRole.UserRole) != self.current_paper_id:
+                self.on_paper_selected()
         menu = QMenu(self)
         open_action = menu.addAction("打开 PDF")
+        open_folder_action = menu.addAction("打开本地文件路径")
         ai_action = menu.addAction("AI 解析")
         save_action = menu.addAction("保存当前编辑")
         menu.addSeparator()
@@ -4895,7 +4902,9 @@ class MainWindow(QMainWindow):
         new_action = menu.addAction("新建文献")
         delete_action = menu.addAction("移入回收站")
         has_paper = self.current_paper_id is not None
+        pdf_exists = has_paper and self.current_pdf_path(show_message=False) is not None
         open_action.setEnabled(has_paper)
+        open_folder_action.setEnabled(pdf_exists)
         ai_action.setEnabled(has_paper)
         save_action.setEnabled(has_paper)
         copy_title_action.setEnabled(has_paper)
@@ -4906,6 +4915,8 @@ class MainWindow(QMainWindow):
         action = menu.exec(self.paper_list.viewport().mapToGlobal(position))
         if action == open_action:
             self.open_current_pdf()
+        elif action == open_folder_action:
+            self.open_current_pdf_folder()
         elif action == ai_action:
             self.ai_analyze_current()
         elif action == save_action:
@@ -8098,6 +8109,20 @@ class MainWindow(QMainWindow):
             os.startfile(target)
         except Exception as exc:
             QMessageBox.warning(self, "打开失败", f"无法打开译文 PDF：{exc}")
+
+    def open_current_pdf_folder(self) -> None:
+        """F30:在资源管理器中打开 PDF 所在文件夹并选中该文件。"""
+        pdf_path = self.current_pdf_path(show_message=False)
+        if pdf_path is None:
+            QMessageBox.information(
+                self, "找不到 PDF", "当前文献没有本地 PDF 或文件已移动。"
+            )
+            return
+        started = QProcess.startDetached(
+            "explorer.exe", [f"/select,{pdf_path}"]
+        )
+        if not started:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path.parent)))
 
     def current_pdf_path(self, show_message: bool = True) -> Path | None:
         pdf_text = self._field_text(self.pdf_path_edit).strip()
