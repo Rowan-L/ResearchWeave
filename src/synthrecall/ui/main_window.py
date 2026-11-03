@@ -4982,6 +4982,7 @@ class MainWindow(QMainWindow):
         category = categories[labels.index(selected_label)]
         updated = self.repository.add_category_to_papers(paper_ids, category.id)
         current_id = self.current_paper_id
+        self._relocate_paper_files(paper_ids)
         self.refresh_categories()
         self.refresh_papers()
         if current_id is not None and current_id in paper_ids:
@@ -7221,6 +7222,24 @@ class MainWindow(QMainWindow):
             card.style().unpolish(card)
             card.style().polish(card)
 
+    def _relocate_paper_files(self, paper_ids: list[int]) -> None:
+        """F29:主分类变更后把受管 PDF 迁移到新分类目录(编辑器/批量/AI 建议
+        共用);发生迁移时刷新列表与详情的 pdf_path。"""
+        if not paper_ids:
+            return
+        self.reader_pdf_preview.close_documents()
+        moved = False
+        for paper_id in paper_ids:
+            try:
+                if self.repository.relocate_paper_pdf(
+                    paper_id, self.data_dir / "papers"
+                ):
+                    moved = True
+            except OSError as exc:
+                self.statusBar().showMessage(f"PDF 迁移失败:{exc}", 6000)
+        if moved:
+            self.refresh_papers()
+
     def _on_card_list_toggle(self, paper_id: int, modifiers) -> None:
         """F28:卡片 Ctrl/Shift 点击 → 按 Qt 选择语义切换列表选中。
 
@@ -7306,6 +7325,7 @@ class MainWindow(QMainWindow):
             return False
         paper_id = self.current_paper_id
         self._set_dirty(False)
+        self._relocate_paper_files([paper_id])
         if refresh:
             self.refresh_papers()
             self.refresh_categories()
@@ -7633,6 +7653,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"分类「{suggestion}」已不存在,建议忽略", 5000)
                 return
         self.repository.set_primary_category(paper_id, match.id)
+        self._relocate_paper_files([paper_id])
         self._clear_suggestion()
         # 应用后三处视图必须同步刷新,否则看起来"没分进去":
         # 树计数(未分类/新分类)、列表卡片分类 chip、详情页分类与建议条

@@ -1494,3 +1494,78 @@ def test_library_statistics_aggregates_for_panel(tmp_path):
     assert months[this_month] == 2  # 跨月边界文A + 新文
     # 回收站文献不进任何分布
     assert "浏览" not in dict(stats.reading_status_counts)
+
+
+def test_relocate_paper_pdf_moves_to_category_dir(tmp_path):
+    """F29:主分类变更后受管 PDF 迁移到新分类目录,pdf_path 同步更新。"""
+    import shutil as _shutil
+
+    from synthrecall.models import Paper
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    factory = create_session_factory(data_dir / "library.db")
+    init_database(factory)
+    repository = LibraryRepository(factory)
+    repository.ensure_default_categories()
+
+    paper = repository.create_blank_paper()
+    uncategorized = next(
+        c for c in repository.list_categories() if c.name == "未分类"
+    )
+    repository.add_category_to_papers([paper.id], uncategorized.id)
+
+    pdf = data_dir / "papers" / "未分类" / "test.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    with factory() as session:
+        row = session.get(Paper, paper.id)
+        row.pdf_path = "papers/未分类/test.pdf"
+        session.commit()
+
+    new_cat = repository.add_category("实验方法")
+    # 模拟用户改分类后的状态:数据库分类已替换,pdf_path 仍指向未分类目录
+    repository.update_paper(
+        paper.id,
+        PaperUpdate(
+            title="测试文献", authors="", year=None, venue="", doi="",
+            arxiv_id="", url="", abstract="", pdf_path="papers/未分类/test.pdf",
+            reading_status="待读", importance=3, summary="", datasets="",
+            dataset_metrics="", methods="", contributions="", limitations="",
+            experiment_notes="", reproducibility_notes="", memory_anchor="",
+            personal_notes="",
+        ),
+        category_ids=[new_cat.id],
+    )
+    moved = repository.relocate_paper_pdf(paper.id, data_dir / "papers")
+    assert moved is True
+    new_path = data_dir / "papers" / "实验方法" / "test.pdf"
+    assert new_path.exists() and new_path.read_bytes() == b"%PDF-1.4 fake"
+    assert not pdf.exists()
+    fresh = repository.get_paper(paper.id)
+    assert fresh.pdf_path == "papers/实验方法/test.pdf"
+
+    # 幂等:已在目标位置,再跑不动
+    assert repository.relocate_paper_pdf(paper.id, data_dir / "papers") is False
+
+    # 无正式分类(仅未分类)的文献:保持在未分类目录
+    other = repository.create_blank_paper()
+    other_pdf = data_dir / "papers" / "未分类" / "other.pdf"
+    other_pdf.write_bytes(b"%PDF-1.4 other")
+    with factory() as session:
+        row = session.get(Paper, other.id)
+        row.pdf_path = "papers/未分类/other.pdf"
+        session.commit()
+    assert repository.relocate_paper_pdf(other.id, data_dir / "papers") is False
+    assert other_pdf.exists()
+
+    # 外部绝对路径不搬
+    external = tmp_path / "outside.pdf"
+    external.write_bytes(b"%PDF-1.4 external")
+    with factory() as session:
+        row = session.get(Paper, other.id)
+        row.pdf_path = str(external)
+        session.commit()
+    assert repository.relocate_paper_pdf(other.id, data_dir / "papers") is False
+    assert external.exists()
+    _shutil.rmtree(data_dir / "papers" / "实验方法", ignore_errors=True)

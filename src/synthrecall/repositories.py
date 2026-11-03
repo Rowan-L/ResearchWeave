@@ -2427,6 +2427,55 @@ class LibraryRepository:
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
         return cleaned[:120]
 
+    def relocate_paper_pdf(self, paper_id: int, library_paper_dir: Path) -> bool:
+        """F29:主分类变更后把受管 PDF 迁移到新分类目录并更新 pdf_path。
+
+        - 仅处理受管相对路径(data/papers/... 下);外部路径不搬
+        - 目标目录 = library_paper_dir / 主分类层级(无正式分类时 = 未分类)
+        - 幂等:已在目标位置则不动;重名沿用 store_pdf_file 的 hash 后缀策略
+        - 返回是否发生了迁移
+        """
+        with self._session_factory() as session:
+            paper = session.get(Paper, paper_id)
+            if paper is None or not (paper.pdf_path or "").strip():
+                return False
+            raw = paper.pdf_path.strip()
+            path = Path(raw)
+            if path.is_absolute():
+                return False
+            old_resolved = self.data_dir / path
+            if not old_resolved.is_file():
+                return False
+            try:
+                old_resolved.relative_to(library_paper_dir.resolve())
+            except ValueError:
+                return False
+            formal = [
+                category
+                for category in paper.categories
+                if category.name != UNCATEGORIZED_CATEGORY_NAME
+            ]
+            category_id = formal[0].id if formal else None
+            category_parts = self._category_path_parts(session, category_id) or ["未分类"]
+            target_dir = library_paper_dir.joinpath(*category_parts)
+            target = target_dir / old_resolved.name
+            if target == old_resolved:
+                return False
+            if target.exists():
+                file_hash = sha256_file(old_resolved)
+                target = target_dir / f"{old_resolved.stem}-{file_hash[:10]}{old_resolved.suffix}"
+                index = 2
+                while target.exists():
+                    target = target_dir / f"{old_resolved.stem}-{file_hash[:10]}-{index}{old_resolved.suffix}"
+                    index += 1
+            papers_relative = library_paper_dir.resolve().relative_to(self.data_dir.resolve())
+            full_relative = papers_relative / target.relative_to(library_paper_dir.resolve())
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_resolved), str(target))
+            paper.pdf_path = full_relative.as_posix()
+            session.commit()
+            return True
+
 
 def parse_dataset_metrics_text(text: str) -> list[dict[str, str]]:
     cleaned = text.strip()
