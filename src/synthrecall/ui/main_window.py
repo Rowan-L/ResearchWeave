@@ -4524,6 +4524,7 @@ class MainWindow(QMainWindow):
                 list_widget.setItemWidget(item, card)
                 card.doubleClicked.connect(self.open_paper_id_in_reader)
                 card.favoriteToggled.connect(self._on_card_favorite_toggled)
+                card.listToggleRequested.connect(self._on_card_list_toggle)
             card.update_content(
                 paper,
                 search_query=search_query,
@@ -4554,6 +4555,7 @@ class MainWindow(QMainWindow):
                 list_widget.setItemWidget(item, card)
                 card.doubleClicked.connect(self.open_paper_id_in_reader)
                 card.favoriteToggled.connect(self._on_card_favorite_toggled)
+                card.listToggleRequested.connect(self._on_card_list_toggle)
                 card.update_content(
                     paper,
                     search_query=search_query,
@@ -5239,6 +5241,10 @@ class MainWindow(QMainWindow):
     def return_from_editor(self) -> None:
         if not self._confirm_pending_changes():
             return
+        # F28:编辑器里可能改了主分类(含从未分类改为正式分类),
+        # 无论保存还是放弃都刷新树计数与列表,避免"仍在未分类"的假象
+        self.refresh_categories()
+        self.refresh_papers()
         self.show_detail_summary()
         self.statusBar().showMessage("已返回文献库", 3000)
 
@@ -5916,6 +5922,13 @@ class MainWindow(QMainWindow):
         item = self.paper_list.currentItem()
         if item is None:
             return
+        # F28:多选(Ctrl/Shift)时提示可批量操作;详情仍跟随当前项
+        # (最后点击的文献),守卫与加载链保持原有行为
+        selected_count = len(self.paper_list.selectedItems())
+        if selected_count > 1:
+            self.statusBar().showMessage(
+                f"已选 {selected_count} 篇文献——可使用「批量」菜单批量操作。", 5000
+            )
         paper_id = item.data(Qt.ItemDataRole.UserRole)
         if paper_id is None:
             return
@@ -7182,6 +7195,17 @@ class MainWindow(QMainWindow):
             if item and item.data(Qt.ItemDataRole.UserRole) == paper_id:
                 self.paper_list.setCurrentItem(item)
                 self.sync_card_selection()
+                cur_item = self.paper_list.currentItem()
+                if cur_item is item:
+                    # current 已落在目标行:确保选中视觉;详情缺失时补加载
+                    if not item.isSelected():
+                        item.setSelected(True)
+                    if paper_id != self.current_paper_id:
+                        self.load_paper(paper_id)
+                else:
+                    # setCurrentItem 被未保存修改守卫恢复(取消切换):
+                    # 保持原文献选中,不加载
+                    self.sync_card_selection()
                 return
 
     def sync_card_selection(self) -> None:
@@ -7191,9 +7215,37 @@ class MainWindow(QMainWindow):
             card = self.paper_list.itemWidget(item)
             if card is None:
                 continue
-            card.setProperty("selected", item is current)
+            # F28:多选(ExtendedSelection)下每张选中卡片都要有视觉反馈,
+            # 只看 currentItem 会让 Ctrl 多选看起来"没生效"
+            card.setProperty("selected", item.isSelected() or item is current)
             card.style().unpolish(card)
             card.style().polish(card)
+
+    def _on_card_list_toggle(self, paper_id: int, modifiers) -> None:
+        """F28:卡片 Ctrl/Shift 点击 → 按 Qt 选择语义切换列表选中。
+
+        卡片(及其子控件)会吞修饰键点击,ExtendedSelection 的原生路径
+        不可靠,这里显式实现:Ctrl=切换选中并置为当前项;Shift=从当前项
+        到本项范围全选。选中变化会自动触发 on_paper_selected 的多选反馈。
+        """
+        item = None
+        for row in range(self.paper_list.count()):
+            candidate = self.paper_list.item(row)
+            if candidate.data(Qt.ItemDataRole.UserRole) == paper_id:
+                item = candidate
+                break
+        if item is None:
+            return
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            anchor = self.paper_list.currentItem() or item
+            anchor_row = self.paper_list.row(anchor)
+            target_row = self.paper_list.row(item)
+            for row in range(min(anchor_row, target_row), max(anchor_row, target_row) + 1):
+                self.paper_list.item(row).setSelected(True)
+            self.paper_list.setCurrentItem(item)
+            return
+        item.setSelected(not item.isSelected())
+        self.paper_list.setCurrentItem(item)
 
     def _on_pdf_annotation_dirty_changed(self, _dirty: bool) -> None:
         self.setWindowTitle(
@@ -7256,6 +7308,7 @@ class MainWindow(QMainWindow):
         self._set_dirty(False)
         if refresh:
             self.refresh_papers()
+            self.refresh_categories()
             self.select_paper(paper_id)
             self.refresh_dataset_metrics()
         self.statusBar().showMessage("已保存", 3000)
@@ -7720,6 +7773,9 @@ class MainWindow(QMainWindow):
             return
         self.refresh_papers()
         self.select_paper(paper.id)
+        # F28:select_paper 不再隐式加载(保持旧的无守卫语义),魔棒创建的
+        # 全新文献没有未保存状态,这里显式加载详情
+        self.load_paper(paper.id)
         self.statusBar().showMessage(f"已创建文献:《{paper.title[:40]}》", 5000)
         # arXiv 文献顺手入队 PDF 下载
         pdf_url = arxiv_pdf_url(paper.arxiv_id or paper.url)

@@ -47,6 +47,9 @@ from synthrecall.ui import theme
 class PaperCard(QFrame):
     doubleClicked = Signal(int)
     favoriteToggled = Signal(int, bool)
+    # F28:Ctrl/Shift 点击卡片时发出(卡片/子控件会吞修饰键点击,
+    # 交给主窗口按 Qt 选择语义切换列表选中,确定性优于事件转发)
+    listToggleRequested = Signal(int, object)
 
     def __init__(
         self,
@@ -175,6 +178,19 @@ class PaperCard(QFrame):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        # F28:Ctrl/Shift+左键 → 请求列表切换本卡片选中(QListWidget 的
+        # ExtendedSelection 对落在卡片子控件上的修饰键点击不可靠)
+        mods = event.modifiers()
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        ):
+            self.listToggleRequested.emit(self.paper_id, mods)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def _apply_favorite(self, favorite: bool) -> None:
         """F21:星标视觉——亮金=已收藏,浅灰=未收藏。"""
