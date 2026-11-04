@@ -7250,6 +7250,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"PDF 迁移失败:{exc}", 6000)
         if moved:
             self.refresh_papers()
+            # F32:迁移更新了数据库里的 pdf_path,但编辑器字段与详情仍指向
+            # 旧路径——右键"打开本地文件路径"读的就是这个字段,不刷新会
+            # "找不到文件"。当前文献受影响时重新加载
+            if self.current_paper_id in paper_ids:
+                self.load_paper(self.current_paper_id)
 
     def _on_card_list_toggle(self, paper_id: int, modifiers) -> None:
         """F28:卡片 Ctrl/Shift 点击 → 按 Qt 选择语义切换列表选中。

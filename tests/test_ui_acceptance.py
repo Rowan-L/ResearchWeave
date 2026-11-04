@@ -1904,3 +1904,40 @@ def test_reading_tick_accumulates_in_real_reader_session(tmp_path, qtbot):
     window.leave_reader()
     rows = repository.reading_time_summary()
     assert rows["today"] >= 10, f"落库后统计应 ≥10 秒,实际 {rows['today']}"
+
+
+def test_relocate_updates_editor_pdf_path_for_folder_reveal(tmp_path, qtbot):
+    """F32:分类迁移后编辑器 pdf_path 字段必须刷新——右键"打开本地文件路径"
+    读的是这个字段,不刷新会找不到已迁移的文件。"""
+    window, repository, paper, source_pdf = make_window(tmp_path, qtbot)
+    new_cat = repository.add_category("实验方法")
+    # 构造"已分类但文件仍在旧目录"的状态(模拟 F29 迁移前)
+    old_dir = window.data_dir / "papers" / "未分类"
+    old_dir.mkdir(parents=True, exist_ok=True)
+    moved_from = old_dir / "reveal.pdf"
+    moved_from.write_bytes(source_pdf.read_bytes())
+    repository.update_paper(
+        paper.id,
+        PaperUpdate(
+            title="迁移测试", authors="", year=None, venue="", doi="",
+            arxiv_id="", url="", abstract="", pdf_path="papers/未分类/reveal.pdf",
+            reading_status="待读", importance=3, summary="", datasets="",
+            dataset_metrics="", methods="", contributions="", limitations="",
+            experiment_notes="", reproducibility_notes="", memory_anchor="",
+            personal_notes="",
+        ),
+        category_ids=[new_cat.id],
+    )
+    window.refresh_papers()
+    window.load_paper(paper.id)
+    assert window.pdf_path_edit.toPlainText() == "papers/未分类/reveal.pdf"
+
+    # 迁移:文件移动 + 编辑器字段刷新
+    window._relocate_paper_files([paper.id])
+    new_path = window.data_dir / "papers" / "实验方法" / "reveal.pdf"
+    assert new_path.exists() and not moved_from.exists()
+    assert window.pdf_path_edit.toPlainText() == "papers/实验方法/reveal.pdf"
+
+    # 右键"打开本地文件路径"的取数路径:current_pdf_path 应解析到新文件
+    resolved = window.current_pdf_path(show_message=False)
+    assert resolved == new_path
