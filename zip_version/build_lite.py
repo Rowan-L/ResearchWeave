@@ -64,11 +64,31 @@ def _slim_app_running() -> bool:
     return "ResearchWeave.exe" in (probe.stdout or "")
 
 
+def _dir_inventory(path: Path) -> tuple[int, int]:
+    """返回(文件数, 总字节数),用于备份/恢复完整性对账。"""
+    count = 0
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+            count += 1
+    return count, total
+
+
+# 构建期 data 备份/恢复的对账结果;非空 = 有用户数据疑似丢失
+_RESTORE_PROBLEMS: list[str] = []
+
+
 def backup_slim_data() -> Path | None:
     """构建前把精简版 data 目录移到备份位,构建后原样恢复。
 
     PyInstaller 构建会整目录删除 dist/ResearchWeave——精简包实例里的
     文献/译文/阅读记录同样是用户数据(B35 同款风险),不能随构建清掉。
+    2026-11-13 曾发现 DB 完好恢复而 papers/arxiv 丢失的事故,故恢复后
+    必须做文件数/字节对账(见 build())。
     """
     data = APP / "data"
     if not data.exists():
@@ -83,8 +103,14 @@ def backup_slim_data() -> Path | None:
     return backup
 
 
-def restore_slim_data(backup: Path | None) -> None:
+def restore_slim_data(
+    backup: Path | None, inventory: tuple[int, int] | None
+) -> None:
     if backup is None or not backup.exists():
+        if inventory is not None:
+            message = "构建前存在 data 但备份目录缺失,数据无法恢复!"
+            print(f"!! {message}", file=sys.stderr)
+            _RESTORE_PROBLEMS.append(message)
         return
     target = APP / "data"
     if target.exists():
@@ -94,6 +120,17 @@ def restore_slim_data(backup: Path | None) -> None:
     backup_root = HERE / "_data_backup"
     if backup_root.exists():
         shutil.rmtree(backup_root, ignore_errors=True)
+    if inventory is not None:
+        restored = _dir_inventory(target)
+        if restored != inventory:
+            message = (
+                f"数据完整性对账失败:备份前 {inventory[0]} 文件/{inventory[1]} 字节,"
+                f"恢复后 {restored[0]} 文件/{restored[1]} 字节——部分数据已在构建中丢失!"
+            )
+            print(f"!! {message}", file=sys.stderr)
+            _RESTORE_PROBLEMS.append(message)
+        else:
+            print(f"数据完整性对账通过({inventory[0]} 文件/{inventory[1]} 字节)。")
 
 
 def build() -> None:
@@ -104,6 +141,8 @@ def build() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
+    data = APP / "data"
+    inventory = _dir_inventory(data) if data.exists() else None
     backup = backup_slim_data()
     try:
         if (DIST / "ResearchWeave").exists():
@@ -122,7 +161,10 @@ def build() -> None:
             print("PyInstaller 构建失败", file=sys.stderr)
             raise SystemExit(result.returncode)
     finally:
-        restore_slim_data(backup)
+        restore_slim_data(backup, inventory)
+    if _RESTORE_PROBLEMS:
+        # 数据疑似丢失:不许继续清理/打包/发版,先人工核实
+        raise SystemExit("构建完成,但数据备份/恢复对账失败,已中止后续步骤")
 
 
 def post_cleanup() -> None:
@@ -154,6 +196,8 @@ def post_cleanup() -> None:
 def assert_sanity() -> None:
     """构建后自检:精简件就位、被排除库确实不在、根 dist 完好。"""
     problems: list[str] = []
+    for problem in _RESTORE_PROBLEMS:
+        problems.append(f"data 备份/恢复对账失败:{problem}")
     shims = INTERNAL / "shims"
     if not (shims / "cv2.py").is_file():
         problems.append("shims/cv2.py 未收进包")

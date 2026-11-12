@@ -5066,7 +5066,6 @@ class MainWindow(QMainWindow):
     def batch_purge_papers(self) -> None:
         paper_ids = self.selected_paper_ids()
         if not paper_ids or not self._confirm_pending_changes():
-            print("DBG purge aborted")
             return
         dialog = ConfirmationDialog(
             window_title="彻底删除",
@@ -5132,14 +5131,43 @@ class MainWindow(QMainWindow):
         menu.addAction("添加分类").triggered.connect(self.batch_add_category)
         menu.addSeparator()
         menu.addAction("翻译所选文献").triggered.connect(self.batch_translate_papers)
+        menu.addAction("翻译所有未翻译文献(当前视图)").triggered.connect(
+            self.batch_translate_untranslated
+        )
         menu.addAction("导出引用(BibTeX/RIS)").triggered.connect(self.batch_export_citations)
         menu.addAction("移入回收站").triggered.connect(self.batch_delete_papers)
 
+    def _paper_has_translation(self, paper_id: int, pdf_path: Path) -> bool:
+        """B42:与「打开单语译文」同源的译文存在性判定(mono 或 dual 任一)。"""
+        result = find_translation_result(pdf_path, self.translation_output_dir(paper_id))
+        return result.mono_pdf is not None or result.dual_pdf is not None
+
     def batch_translate_papers(self) -> None:
-        """F22:多选批量翻译——一次确认,逐篇进入现有任务队列串行执行。"""
+        """F22:多选批量翻译——一次确认,逐篇进入现有任务队列串行执行。
+
+        B42:已有译文的文献默认跳过,避免重复翻译重复花 token。
+        """
         paper_ids = self.selected_paper_ids()
-        candidates: list[tuple[int, Path]] = []
+        if not paper_ids:
+            QMessageBox.information(self, "未选择文献", "请先选择要翻译的文献。")
+            return
+        self._start_batch_translation(paper_ids, source_label="所选文献")
+
+    def batch_translate_untranslated(self) -> None:
+        """B42:把当前视图中全部「有本地 PDF 且无译文」的文献加入翻译队列。"""
+        paper_ids = [
+            int(item.data(Qt.ItemDataRole.UserRole))
+            for row in range(self.paper_list.count())
+            if (item := self.paper_list.item(row)) is not None
+            and item.data(Qt.ItemDataRole.UserRole) is not None
+        ]
+        self._start_batch_translation(paper_ids, source_label="当前视图")
+
+    def _start_batch_translation(self, paper_ids: list[int], *, source_label: str) -> None:
+        paper_ids = list(dict.fromkeys(paper_ids))
+        candidates: list[tuple[int, Path, str]] = []
         missing = 0
+        translated_titles: list[str] = []
         for paper_id in paper_ids:
             paper = self.repository.get_paper(paper_id)
             if paper is None or not paper.pdf_path:
@@ -5149,26 +5177,48 @@ class MainWindow(QMainWindow):
             if pdf_path is None or not pdf_path.exists():
                 missing += 1
                 continue
-            candidates.append((paper_id, pdf_path))
+            title = paper.title.strip() or pdf_path.stem
+            if self._paper_has_translation(paper_id, pdf_path):
+                translated_titles.append(title)
+                continue
+            candidates.append((paper_id, pdf_path, title))
         if not candidates:
-            QMessageBox.information(
-                self, "没有可翻译文献", "所选文献没有本地 PDF,无法翻译。"
-            )
+            if translated_titles:
+                QMessageBox.information(
+                    self,
+                    "均已有译文",
+                    f"{source_label}的 {len(translated_titles)} 篇文献都已有译文，未重新翻译。\n"
+                    "需要重新翻译时，请在该文献详情中单独点击「翻译 PDF」。",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "没有可翻译文献",
+                    f"{source_label}中没有带本地 PDF 的文献，无法翻译。",
+                )
             return
-        total_mb = sum(path.stat().st_size for _, path in candidates) / (1024 * 1024)
+        titles = [title for _, _, title in candidates]
+        if len(titles) <= 3:
+            scope = "、".join(f"《{title}》" for title in titles)
+        else:
+            scope = "、".join(f"《{title}》" for title in titles[:3]) + f" 等 {len(titles)} 篇"
+        total_mb = sum(path.stat().st_size for _, path, _ in candidates) / (1024 * 1024)
+        skip_notes = []
+        if missing:
+            skip_notes.append(f"{missing} 篇无本地 PDF")
+        if translated_titles:
+            skip_notes.append(f"{len(translated_titles)} 篇已有译文")
+        skip_text = f"（跳过{'、'.join(skip_notes)}）" if skip_notes else ""
         if not confirm_external_request(
             self.settings_path,
-            operation="批量翻译所选 PDF",
-            content_summary=(
-                f"{len(candidates)} 篇 PDF 全文，共约 {total_mb:.1f} MB"
-                + (f"（另有 {missing} 篇无本地 PDF，将跳过）" if missing else "")
-            ),
+            operation="批量翻译 PDF",
+            content_summary=f"{scope}的 PDF 全文，共约 {total_mb:.1f} MB{skip_text}",
             output_summary="译文将保存到各文献的翻译目录",
             parent=self,
         ):
             self.statusBar().showMessage("已取消批量翻译", 3000)
             return
-        for paper_id, pdf_path in candidates:
+        for paper_id, pdf_path, _title in candidates:
             if self.translate_thread is not None or self.ai_thread is not None:
                 self._enqueue_task(
                     "PDF 翻译",
@@ -5180,8 +5230,7 @@ class MainWindow(QMainWindow):
             else:
                 self.start_pdf_translation(paper_id, pdf_path, confirm=False)
         self.statusBar().showMessage(
-            f"已加入翻译队列 {len(candidates)} 篇"
-            + (f"（跳过 {missing} 篇无本地 PDF）" if missing else ""),
+            f"已加入翻译队列 {len(candidates)} 篇" + skip_text,
             5000,
         )
 
@@ -6386,6 +6435,12 @@ class MainWindow(QMainWindow):
             self.pdf_preview.set_pdf_path(str(path))
             self.update_pdf_action_state()
             self._set_dirty(False)
+            # B40:正停留在该文献的阅读页时自动加载新 PDF,
+            # 不再要求用户返回文献库重进
+            if self.main_stack.currentWidget() is self.reader_page:
+                downloaded = self.repository.get_paper(paper_id)
+                if downloaded is not None:
+                    self.load_reader_documents(downloaded)
         self.refresh_papers()
         self.select_paper(paper_id)
         self.statusBar().showMessage(f"PDF 已下载并归档：{path.name}", 5000)
@@ -8108,7 +8163,7 @@ class MainWindow(QMainWindow):
         target = result.mono_pdf if kind == "mono" else result.dual_pdf
         if target is None:
             label = "单语译文" if kind == "mono" else "双语对照"
-            QMessageBox.information(self, "没有译文", f"还没有找到当前文献的{label} PDF，请先点击“翻译PDF”。")
+            QMessageBox.information(self, "没有译文", f"还没有找到当前文献的{label} PDF，请先点击「翻译 PDF」。")
             return
         try:
             os.startfile(target)

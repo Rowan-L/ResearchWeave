@@ -19,12 +19,29 @@ APP_DIR = ROOT / "dist" / "ResearchWeave"
 DATA_DIR = APP_DIR / "data"
 BACKUP_DIR = ROOT / "dist" / "_data_backup"
 
+# 构建期 data 备份/恢复的对账结果;非空 = 有用户数据疑似丢失
+_RESTORE_PROBLEMS: list[str] = []
+
 
 def _app_running() -> bool:
     # 注意:不要用 tasklist /FI —— Git Bash 会把 "/FI" 当路径做 MSYS 转换,
     # 过滤失效导致漏检正在运行的实例(B35 当晚实际踩坑)。
     probe = subprocess.run(["tasklist"], check=False, capture_output=True, text=True)
     return "ResearchWeave.exe" in (probe.stdout or "")
+
+
+def _dir_inventory(path: Path) -> tuple[int, int]:
+    """返回(文件数, 总字节数),用于备份/恢复完整性对账。"""
+    count = 0
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+            count += 1
+    return count, total
 
 
 def main() -> int:
@@ -37,7 +54,9 @@ def main() -> int:
         return 1
 
     backup: Path | None = None
+    inventory: tuple[int, int] | None = None
     if DATA_DIR.exists():
+        inventory = _dir_inventory(DATA_DIR)
         if BACKUP_DIR.exists():
             shutil.rmtree(BACKUP_DIR)
         BACKUP_DIR.mkdir(parents=True)
@@ -59,8 +78,26 @@ def main() -> int:
                 shutil.rmtree(DATA_DIR)
             shutil.move(str(backup), str(DATA_DIR))
             print(f"已恢复打包版数据 -> {DATA_DIR}")
+            if inventory is not None:
+                restored = _dir_inventory(DATA_DIR)
+                if restored != inventory:
+                    message = (
+                        f"数据完整性对账失败:备份前 {inventory[0]} 文件/{inventory[1]} 字节,"
+                        f"恢复后 {restored[0]} 文件/{restored[1]} 字节——部分数据已在构建中丢失!"
+                    )
+                    print(f"!! {message}", file=sys.stderr)
+                    _RESTORE_PROBLEMS.append(message)
+                else:
+                    print(f"数据完整性对账通过({inventory[0]} 文件/{inventory[1]} 字节)。")
+        elif inventory is not None:
+            message = "构建前存在 data 但备份目录缺失,数据无法恢复!"
+            print(f"!! {message}", file=sys.stderr)
+            _RESTORE_PROBLEMS.append(message)
         if BACKUP_DIR.exists():
             shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+    if _RESTORE_PROBLEMS:
+        # 数据疑似丢失:明确报错,让人工核实后再发版
+        return 1
     return 0
 
 

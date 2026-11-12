@@ -1006,6 +1006,179 @@ def test_batch_translate_enqueues_selected(tmp_path, qtbot, monkeypatch):
     _quit_translation_thread(window, qtbot)
 
 
+def _make_paper_with_pdf(repository, tmp_path, name):
+    paper = repository.create_blank_paper()
+    pdf_path = tmp_path / f"{name}.pdf"
+    write_plain_pdf(pdf_path)
+    repository.update_paper_pdf_path(paper.id, str(pdf_path))
+    return paper, pdf_path
+
+
+def _seed_translation(window, paper_id, pdf_path) -> None:
+    """在译文目录放一个命中文译规则的 mono PDF(存在性即判定已翻译)。"""
+    out_dir = window.translation_output_dir(paper_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{pdf_path.stem}.no_watermark.zh.mono.pdf").write_bytes(b"%PDF-1.4 fake")
+
+
+def test_batch_translate_skips_already_translated(tmp_path, qtbot, monkeypatch):
+    """B42:已有译文的文献默认跳过;确认框说明跳过数量并列出标题。"""
+    import synthrecall.ui.main_window as mw_module
+
+    class FakeMessageBox:
+        @staticmethod
+        def information(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def warning(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+    monkeypatch.setattr(mw_module, "PDFTranslateWorker", _StubTranslateWorker)
+    confirm_calls = []
+    monkeypatch.setattr(
+        mw_module,
+        "confirm_external_request",
+        lambda *_args, **kwargs: confirm_calls.append(kwargs.get("content_summary", ""))
+        or True,
+    )
+
+    window, repository = build_window(tmp_path, qtbot)
+    fresh, _fresh_pdf = _make_paper_with_pdf(repository, tmp_path, "fresh")
+    done, done_pdf = _make_paper_with_pdf(repository, tmp_path, "done")
+    _seed_translation(window, done.id, done_pdf)
+    window.refresh_papers()
+
+    monkeypatch.setattr(
+        type(window), "selected_paper_ids", lambda self: [fresh.id, done.id]
+    )
+    window.batch_translate_papers()
+
+    assert window.translate_thread is not None, "未翻译的一篇应立即启动"
+    assert window.task_manager.pending_count() == 0, "已翻译的不应入队"
+    assert len(confirm_calls) == 1
+    assert "已有译文" in confirm_calls[0], "确认框应说明跳过已翻译"
+    assert "《" in confirm_calls[0], "确认框应列出文献标题"
+    records = window.task_manager.records()
+    assert sum(1 for r in records if r.name == "PDF 翻译") == 1
+    _quit_translation_thread(window, qtbot)
+
+
+def test_batch_translate_all_translated_shows_notice(tmp_path, qtbot, monkeypatch):
+    """B42:所选全部已有译文时,提示后不弹外部请求确认、不启动翻译。"""
+    import synthrecall.ui.main_window as mw_module
+
+    captured = []
+
+    class FakeMessageBox:
+        @staticmethod
+        def information(parent, title, text, *args, **kwargs):
+            captured.append((title, text))
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+    confirm_called = []
+    monkeypatch.setattr(
+        mw_module,
+        "confirm_external_request",
+        lambda *_args, **_kwargs: confirm_called.append(1) or True,
+    )
+
+    window, repository = build_window(tmp_path, qtbot)
+    done, done_pdf = _make_paper_with_pdf(repository, tmp_path, "allrowned")
+    _seed_translation(window, done.id, done_pdf)
+    window.refresh_papers()
+
+    monkeypatch.setattr(type(window), "selected_paper_ids", lambda self: [done.id])
+    window.batch_translate_papers()
+
+    assert captured and captured[0][0] == "均已有译文"
+    assert not confirm_called, "全部已翻译时不应弹外部请求确认"
+    assert window.translate_thread is None
+    assert window.task_manager.pending_count() == 0
+
+
+def test_batch_translate_without_selection_shows_hint(tmp_path, qtbot, monkeypatch):
+    """B42:零选中且无当前文献时,提示「未选择文献」而非误导的"没有本地 PDF"。"""
+    import synthrecall.ui.main_window as mw_module
+
+    captured = []
+
+    class FakeMessageBox:
+        @staticmethod
+        def information(parent, title, text, *args, **kwargs):
+            captured.append((title, text))
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+
+    window, _repository = build_window(tmp_path, qtbot)
+    window.current_paper_id = None
+    monkeypatch.setattr(type(window), "selected_paper_ids", lambda self: [])
+    window.batch_translate_papers()
+
+    assert captured and captured[0][0] == "未选择文献"
+    assert "没有本地 PDF" not in captured[0][1]
+    assert window.translate_thread is None
+
+
+def test_batch_translate_untranslated_view_entry(tmp_path, qtbot, monkeypatch):
+    """B42:「翻译所有未翻译文献(当前视图)」只收有 PDF 且未翻译的文献。"""
+    import synthrecall.ui.main_window as mw_module
+
+    class FakeMessageBox:
+        @staticmethod
+        def information(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+    monkeypatch.setattr(mw_module, "PDFTranslateWorker", _StubTranslateWorker)
+    monkeypatch.setattr(mw_module, "confirm_external_request", lambda *_a, **_k: True)
+
+    window, repository = build_window(tmp_path, qtbot)
+    _fresh, _fresh_pdf = _make_paper_with_pdf(repository, tmp_path, "viewfresh")
+    done, done_pdf = _make_paper_with_pdf(repository, tmp_path, "viewdone")
+    _seed_translation(window, done.id, done_pdf)
+    repository.create_blank_paper()  # 无本地 PDF
+    window.refresh_papers()
+
+    window._rebuild_batch_menu()
+    actions = [action.text() for action in window._batch_menu.actions()]
+    assert "翻译所有未翻译文献(当前视图)" in actions
+
+    window.batch_translate_untranslated()
+
+    assert window.translate_thread is not None
+    records = window.task_manager.records()
+    assert sum(1 for r in records if r.name == "PDF 翻译") == 1, "只应有 1 篇入队"
+    _quit_translation_thread(window, qtbot)
+
+
+def test_arxiv_download_finished_reloads_reader(tmp_path, qtbot, monkeypatch):
+    """B40:下载完成时正停留在该文献的阅读页,阅读器应自动加载新 PDF。"""
+    import synthrecall.ui.main_window as mw_module
+
+    class FakeMessageBox:
+        @staticmethod
+        def warning(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+
+    window, repository = build_window(tmp_path, qtbot)
+    paper = repository.create_blank_paper()
+    pdf_path = tmp_path / "b40.pdf"
+    write_plain_pdf(pdf_path)
+    window.refresh_papers()
+    window.current_paper_id = paper.id
+
+    window.main_stack.setCurrentWidget(window.reader_page)
+    window.on_arxiv_pdf_download_finished(paper.id, pdf_path)
+
+    loaded = window.reader_pdf_preview.pdf_path
+    assert loaded is not None and loaded.exists(), "阅读器应自动加载新下载的 PDF"
+    assert window.reader_pdf_preview.page_count >= 1
+
+
 def test_ai_experiment_metrics_normalization():
     """F22:experiment_metrics 严格归一化——坏行丢弃、去重、numeric 容错。"""
     from synthrecall.ai import PaperAIAnalysis
