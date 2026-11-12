@@ -7362,8 +7362,14 @@ class MainWindow(QMainWindow):
         if self.current_paper_id is None:
             QMessageBox.information(self, "没有文献", "请先新建或选择一篇文献。")
             return False
+        # B43:标题清空后保存会让 update_paper 静默把标题归一化为
+        # "未命名文献",等于丢标题——这里显式拦截
+        title_text = self._field_text(self.title_edit).strip()
+        if not title_text:
+            QMessageBox.information(self, "缺少标题", "请先填写文献标题，标题不能为空。")
+            return False
         update = PaperUpdate(
-            title=self._field_text(self.title_edit),
+            title=title_text,
             authors=self._field_text(self.authors_edit),
             year=None if self.year_edit.value() == 0 else self.year_edit.value(),
             venue=self._field_text(self.venue_edit),
@@ -8086,6 +8092,27 @@ class MainWindow(QMainWindow):
             for directory in translations_root.iterdir():
                 if directory.is_dir() and not directory.name.isdigit():
                     orphan_translations.append(directory)
+        # B44:悬空引用 = pdf_path 指向不存在的文件(丢失/被移动)。
+        # 只报告不改动;arXiv 文献可在详情页「获取 PDF」重新下载自愈。
+        dangling: list[tuple[str, str]] = []
+        for paper in self.repository.list_papers() + self.repository.list_trashed_papers():
+            if not paper.pdf_path:
+                continue
+            resolved = self.repository.resolve_pdf_path(paper.pdf_path)
+            if resolved is None or not resolved.exists():
+                dangling.append((paper.title or f"#{paper.id}", paper.pdf_path))
+        if dangling:
+            lines = [f"• {title} — {path}" for title, path in dangling[:10]]
+            if len(dangling) > 10:
+                lines.append("……")
+            QMessageBox.information(
+                self,
+                "发现悬空的 PDF 引用",
+                f"以下 {len(dangling)} 篇文献的 pdf_path 指向不存在的文件"
+                "(文件已丢失或被移动),本次扫描不会改动它们:\n"
+                + "\n".join(lines)
+                + "\n\narXiv 文献可在详情页点击「获取 PDF」重新下载。",
+            )
         if not orphan_pdfs and not orphan_translations:
             QMessageBox.information(
                 self, "扫描完成", "没有发现孤儿文件,库非常干净。"

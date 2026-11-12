@@ -1179,6 +1179,88 @@ def test_arxiv_download_finished_reloads_reader(tmp_path, qtbot, monkeypatch):
     assert window.reader_pdf_preview.page_count >= 1
 
 
+def test_save_current_paper_rejects_empty_title(tmp_path, qtbot, monkeypatch):
+    """B43:清空标题后保存必须被拦截,不得静默把标题归一化为「未命名文献」。"""
+    import synthrecall.ui.main_window as mw_module
+
+    captured = []
+
+    class FakeMessageBox:
+        StandardButton = mw_module.QMessageBox.StandardButton
+
+        @staticmethod
+        def information(parent, title, text, *args, **kwargs):
+            captured.append((title, text))
+            return mw_module.QMessageBox.StandardButton.Ok
+
+        @staticmethod
+        def warning(*_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+
+    window, repository = build_window(tmp_path, qtbot)
+    paper = repository.create_blank_paper()
+    window.refresh_papers()
+    window.select_paper(paper.id)
+    original_title = window._field_text(window.title_edit)
+    assert original_title.strip(), "前置:新建文献应有默认标题"
+
+    window._set_field_text(window.title_edit, "  ")
+    saved = window.save_current_paper()
+
+    assert saved is False, "空标题保存应返回 False"
+    assert captured and captured[0][0] == "缺少标题", "应弹「缺少标题」提示"
+    row = repository.get_paper(paper.id)
+    assert (row.title or "").strip() == original_title.strip(), "标题不得被改写"
+
+    # 填回标题后可正常保存
+    window._set_field_text(window.title_edit, original_title)
+    assert window.save_current_paper() is True
+
+
+def test_scan_reports_dangling_pdf_refs(tmp_path, qtbot, monkeypatch):
+    """B44:孤儿扫描应报告 pdf_path 悬空的文献(只报告,不改动、不误删)。"""
+    import synthrecall.ui.main_window as mw_module
+
+    info_captured = []
+    from PySide6.QtWidgets import QMessageBox as _RealBox
+
+    class FakeMessageBox:
+        StandardButton = _RealBox.StandardButton
+
+        @staticmethod
+        def information(parent, title, text, *args, **kwargs):
+            info_captured.append((title, text))
+            return _RealBox.StandardButton.Ok
+
+        @staticmethod
+        def warning(*_args, **_kwargs):
+            return None
+
+    confirm_calls = []
+
+    def fake_confirm_action(*_args, **_kwargs):
+        confirm_calls.append(1)
+        return False
+
+    monkeypatch.setattr(mw_module, "QMessageBox", FakeMessageBox)
+    monkeypatch.setattr(mw_module, "confirm_action", fake_confirm_action)
+
+    window, repository = build_window(tmp_path, qtbot)
+    paper = repository.create_blank_paper()
+    repository.update_paper_pdf_path(paper.id, "papers/未分类/ghost.pdf")
+    window.refresh_papers()
+
+    window.scan_orphan_files()
+
+    assert info_captured and "悬空" in info_captured[0][0], "应弹悬空引用报告"
+    assert "ghost.pdf" in info_captured[0][1], "报告应包含悬空路径"
+    assert not (window.data_dir / "papers" / "未分类").exists() or not any(
+        (window.data_dir / "papers" / "未分类").glob("ghost.pdf")
+    ), "悬空引用不得触发任何删除"
+
+
 def test_ai_experiment_metrics_normalization():
     """F22:experiment_metrics 严格归一化——坏行丢弃、去重、numeric 容错。"""
     from synthrecall.ai import PaperAIAnalysis
